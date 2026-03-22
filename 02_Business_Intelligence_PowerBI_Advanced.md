@@ -1475,3 +1475,366 @@ To build a dynamic RLS audit warning, I create a DAX measure that counts the row
 **Short Interview Answer:**
 In the Performance Analyzer, a high "Other" time with a low "DAX Query" time almost always indicates HTTP Connection Queuing. Browsers restrict concurrent connections to the Power BI service. If a page contains too many individual visuals, they cannot all fetch data simultaneously; they must wait in line for an open connection. The time spent idling in that queue is categorized as "Other." To fix this, I must drastically reduce the total number of visual elements on the page by consolidating them, or I must optimize the slowest DAX queries on the page, as they act as bottlenecks holding up the queue for the faster visuals.
 
+
+## Part 55: Power Query - Advanced Date & Time Conversions
+
+### 85. Your telemetry database stores timestamps as Unix Epoch Integers (e.g., `1672531200`). How do you efficiently convert this into a standard DateTime column in Power Query, ensuring timezone accuracy (UTC vs. Local)?
+**Detailed Answer:**
+*   **The Math:** Unix time is the number of seconds that have elapsed since the Unix Epoch (January 1, 1970, 00:00:00 UTC).
+*   **The Power Query Solution:** You add a custom column using the `#datetime` literal to define the epoch, and then use the `#duration` literal to add the seconds.
+    ```powerquery
+    // Formula for a Custom Column:
+    #datetime(1970, 1, 1, 0, 0, 0) + #duration(0, 0, 0, [UnixTimestampColumn])
+    ```
+*   **Timezone Handling:** 
+    *   The resulting column from the formula above is strictly **UTC**. 
+    *   If you need it in Local Time (e.g., EST), do *not* just add/subtract hours manually, as this breaks during Daylight Saving Time.
+    *   Instead, first convert the new column to a `DateTimeZone` type: `DateTime.AddZone([NewDateTimeColumn], 0)`.
+    *   Then, use the native `DateTimeZone.SwitchZone` function (or the UI "Change Type -> Using Locale") to properly shift it to the target timezone, which handles DST automatically.
+
+**Short Interview Answer:**
+To convert a Unix timestamp, I create a custom column in Power Query that establishes the Unix Epoch baseline using the `#datetime(1970,1,1,0,0,0)` literal. I then add the integer column to it using the `#duration` function, specifically placing the integer in the seconds parameter: `#duration(0,0,0,[UnixTime])`. This yields an accurate UTC DateTime. To handle timezones without breaking during Daylight Saving Time, I convert that result to a `DateTimeZone` type, and use the `DateTimeZone.SwitchZone` function to safely transpose it to the user's local reporting timezone.
+
+## Part 56: DAX - Virtual Relationships with `INTERSECT` and `EXCEPT`
+
+### 86. You have a list of Servers that failed yesterday (Table A), and a list of Servers that failed today (Table B). Write DAX to find the servers that failed *both* days, and another to find the servers that failed today but *not* yesterday.
+**Detailed Answer:**
+When analyzing operational state changes, Set Theory functions (`INTERSECT`, `EXCEPT`, `UNION`) are incredibly powerful and often faster than complex `FILTER` logic.
+1.  **Servers that failed BOTH days (`INTERSECT`):**
+    *   `INTERSECT` returns only the rows that exist in the left table AND the right table.
+    ```dax
+    Failed Both Days = 
+    VAR YesterdayFails = VALUES(TableA[ServerName])
+    VAR TodayFails = VALUES(TableB[ServerName])
+    RETURN
+    COUNTROWS( INTERSECT(TodayFails, YesterdayFails) )
+    ```
+2.  **Servers that failed TODAY but NOT yesterday (New Failures - `EXCEPT`):**
+    *   `EXCEPT` returns the rows from the left table that DO NOT exist in the right table. (Order matters perfectly here).
+    ```dax
+    New Failures Today = 
+    VAR YesterdayFails = VALUES(TableA[ServerName])
+    VAR TodayFails = VALUES(TableB[ServerName])
+    RETURN
+    -- Take Today's list, and subtract anyone who was also on Yesterday's list
+    COUNTROWS( EXCEPT(TodayFails, YesterdayFails) )
+    ```
+
+**Short Interview Answer:**
+For comparative state analysis without physical relationships, I use DAX Set Theory functions. To find servers that failed both days, I extract the distinct server names from both tables into variables using `VALUES()`, and pass them into the `INTERSECT()` function, which acts as a virtual inner join, returning only the mutual rows. To identify strictly new failures, I use the `EXCEPT(LeftTable, RightTable)` function. By placing "Today's Failures" as the left table and "Yesterday's" as the right, it returns only the servers present today that were completely absent yesterday, allowing me to instantly count the net-new incidents.
+
+
+## Part 57: Advanced DAX - Dynamic Segmentation with Disconnected Tables (Part 2)
+
+### 87. You have a massive `Incidents` table. You want to allow users to dynamically change the X-axis of a bar chart between "Region", "Environment", and "Cluster" using a single slicer. How do you implement "Dynamic Dimensions" (Field Parameters) to achieve this without building three separate charts?
+**Detailed Answer:**
+*   **The Old Way (Bookmarks):** You would build three identical charts, stack them on top of each other, and use Bookmarks and Buttons to hide/show them. This is tedious to maintain.
+*   **The Modern Solution (Field Parameters):** Power BI introduced a feature specifically for this.
+    1.  Go to Modeling -> New Parameter -> Fields.
+    2.  Select the `Region`, `Environment`, and `Cluster` columns from your dimension tables.
+    3.  Power BI generates a disconnected DAX table in the background:
+        ```dax
+        Parameter = {
+            ("Region", NAMEOF('Dim_Geography'[Region]), 0),
+            ("Environment", NAMEOF('Dim_Environment'[Env_Type]), 1),
+            ("Cluster", NAMEOF('Dim_Servers'[Cluster]), 2)
+        }
+        ```
+    4.  **Implementation:** You place this new `Parameter` table into a Slicer. Then, you drag that exact same `Parameter` field into the X-axis of your single Bar Chart.
+    5.  **Result:** When the user clicks "Environment" on the slicer, the VertiPaq engine dynamically hot-swaps the underlying column referenced in the visual, instantly changing the grouping of the data from Geography to Environment.
+
+**Short Interview Answer:**
+To allow users to dynamically swap the axis of a visual, I use the "Field Parameters" feature. This automatically generates a disconnected configuration table utilizing the `NAMEOF()` DAX function to reference existing model columns. I place this parameter field into a user-facing slicer, and also drop it onto the X-axis of the target visual. When the user interacts with the slicer, the engine dynamically intercepts the selection and hot-swaps the underlying grouping column within the visual's DAX query, completely eliminating the need for complex, heavy Bookmark-based visual toggling.
+
+## Part 58: Architecture - Power BI API & Custom Visuals
+
+### 88. Your enterprise relies on a proprietary D3.js visualization that doesn't exist in the Power BI AppSource. What is the high-level process for developing and deploying a Custom Power BI Visual?
+**Detailed Answer:**
+Power BI is built on web technologies (HTML/TypeScript), making it highly extensible.
+1.  **Environment Setup:** You must install Node.js and the specific Power BI Visual Tools CLI (`npm i -g powerbi-visuals-tools`).
+2.  **Scaffolding:** Run `pbiviz new MyCustomVisual`. This generates a TypeScript project template.
+3.  **The Code:** 
+    *   You write the D3.js or React logic inside the `visual.ts` file. 
+    *   The crucial part is the `update` method. Every time a user changes a slicer, Power BI calls your `update` method, passing in the newly filtered data array via the `DataView` interface. Your D3.js code must parse this `DataView` and redraw the SVG elements.
+4.  **Capabilities:** You define what data your visual accepts (e.g., one category, two measures) in the `capabilities.json` file.
+5.  **Packaging & Deployment:** 
+    *   You compile it using `pbiviz package`, which generates a `.pbiviz` file.
+    *   *Enterprise Deployment:* You do not just email this file to users. The Power BI Admin uploads the `.pbiviz` file to the "Organizational Visuals" repository in the Power BI Admin Portal. This makes it instantly available to all internal developers and ensures security governance over third-party code.
+
+**Short Interview Answer:**
+Developing a custom visual requires Node.js and the `powerbi-visuals-tools` CLI. You scaffold a TypeScript project and inject your custom D3.js or React rendering logic into the core `update` method, which is constantly fed filtered data arrays via Power BI's `DataView` API. Once compiled into a `.pbiviz` file, the artifact must be officially published by a tenant Administrator into the "Organizational Visuals" portal. This allows all internal developers to natively discover and import the approved, proprietary visual directly within Power BI Desktop, while maintaining strict corporate security governance over executing custom JavaScript.
+
+
+## Part 59: DAX - Time Intelligence without Standard Functions
+
+### 89. You have an `Active_Incidents` Fact table with `IncidentID`, `Open_Date`, and `Close_Date`. The business wants a line chart showing the exact number of active incidents *on any given day in history*. Why do standard relationships fail, and how do you write the DAX?
+**Detailed Answer:**
+*   **The Flawed Relationship:** If you connect a `Date` table to `Open_Date` and count incidents, the chart only shows "How many incidents *opened* on this day." It doesn't tell you how many were *currently active* on that day.
+*   **The Disconnected Approach (Events in Progress):** You must delete the active relationship between the `Date` table and the `Active_Incidents` table.
+*   **The DAX Logic:** You write a measure that evaluates every single row in the Fact table against the *currently selected Date* on the visual's X-axis.
+```dax
+Active Incidents Over Time = 
+VAR CurrentChartDate = MAX('Date'[Date])
+RETURN
+CALCULATE(
+    COUNTROWS('Active_Incidents'),
+    FILTER(
+        'Active_Incidents',
+        -- The incident must have opened on or BEFORE the chart's date
+        'Active_Incidents'[Open_Date] <= CurrentChartDate &&
+        -- The incident must have closed AFTER the chart's date, or still be open (BLANK)
+        (
+            'Active_Incidents'[Close_Date] > CurrentChartDate || 
+            ISBLANK('Active_Incidents'[Close_Date])
+        )
+    )
+)
+```
+*   **How it executes:** As the line chart plots "March 15th", the measure scans the entire incident table. It counts an incident *only* if its open date was `<= March 15` AND its close date was `> March 15`. This perfectly captures the "in-progress" state for that exact historical day.
+
+**Short Interview Answer:**
+To graph "Events in Progress" over a timeline, standard active relationships fail because they only track a single event (like the exact Opening Date). To solve this, I remove the physical relationship between the Fact table and the Date dimension. I then write a custom DAX measure using `FILTER`. For every data point on the chart's axis, the measure calculates the count of rows where the incident's `Open_Date` is less than or equal to the visual's current date, AND the `Close_Date` is strictly greater than the visual's current date (or is completely blank). This mathematically captures the overlapping duration.
+
+## Part 60: Power BI Embedded & Security
+
+### 90. Your company wants to embed a Power BI dashboard directly into their SaaS product for external customers. Explain the architectural difference between "App Owns Data" vs "User Owns Data".
+**Detailed Answer:**
+Power BI Embedded offers two completely distinct authentication and licensing architectures.
+*   **"User Owns Data" (Internal Enterprise):**
+    *   *The Target:* Internal employees logging into an internal SharePoint or custom portal.
+    *   *How it works:* The web app prompts the user to sign in via Azure AD. The application passes that user's specific Azure AD token to Power BI. 
+    *   *Licensing:* Every single user viewing the embedded dashboard *must* have a Power BI Pro license (or the workspace must be backed by Premium).
+*   **"App Owns Data" (External SaaS):**
+    *   *The Target:* External customers logging into your commercial software product. They do not have Azure AD accounts in your tenant.
+    *   *How it works:* The user logs into your web app using your app's custom auth (e.g., Auth0). Your web app's backend uses a "Master User" account or a Service Principal to silently authenticate to the Power BI REST API. The API generates an ephemeral `Embed Token` and sends it back to the web frontend to render the `<iframe>`.
+    *   *Licensing:* The external users do *not* need Power BI licenses. You buy an "A-SKU" Azure capacity node, paying a flat hourly rate for the compute power, regardless of whether 10 or 10,000 external customers view the dashboard.
+*   **Security (RLS):** In "App Owns Data", because the Master Account pulls the data, you must inject the specific customer's ID into the `Embed Token` generation request using the `EffectiveIdentity` property. Power BI uses this injected identity to enforce Row-Level Security so Customer A cannot see Customer B's data.
+
+**Short Interview Answer:**
+"User Owns Data" relies on interactive Azure AD logins; it is meant for internal portals, and every viewer requires a Power BI Pro license. "App Owns Data" is designed for external SaaS products where users lack corporate Azure AD identities. The application's backend uses a Service Principal to authenticate silently and generate a secure `Embed Token` for the frontend. This model requires purchasing Azure A-SKU capacity nodes instead of per-user licenses. Crucially, to enforce multi-tenant isolation, the backend must dynamically inject the customer's ID into the `EffectiveIdentity` payload during token generation, allowing Power BI to apply strict Row-Level Security.
+
+
+## Part 61: Advanced Power Query - Custom Connectors & M Functions
+
+### 91. You need to connect Power BI to an internal GraphQL API. Power BI has no native GraphQL connector. How do you construct the `Web.Contents` call in M to send a complex POST request containing a GraphQL JSON payload?
+**Detailed Answer:**
+*   **The GraphQL Challenge:** GraphQL does not use RESTful URL paths (like `/api/users/1`). It relies on a single endpoint (like `/graphql`) and expects a `POST` request where the body contains a highly structured JSON query defining the exact fields to return.
+*   **The M Solution (`Web.Contents` Options):** You must manipulate the `Content` and `Headers` properties of the `Web.Contents` record. If you provide the `Content` property, Power Query automatically changes the HTTP method from `GET` to `POST`.
+*   **The Code:**
+    ```powerquery
+    let
+        url = "https://api.mycompany.com/graphql",
+        
+        // 1. Define the GraphQL query string
+        graphql_query = "{
+            ""query"": ""query { infrastructure { servers { id hostname cpu_cores status } } }""
+        }",
+        
+        // 2. Convert the string to binary (Required by the Content parameter)
+        payload = Text.ToBinary(graphql_query),
+        
+        // 3. Make the POST request
+        Source = Web.Contents(
+            url,
+            [
+                Headers=[#"Content-Type"="application/json", #"Authorization"="Bearer TOKEN"],
+                Content=payload
+            ]
+        ),
+        
+        // 4. Parse the returning JSON
+        json_response = Json.Document(Source),
+        
+        // 5. Drill down into the specific GraphQL 'data' structure
+        extracted_data = json_response[data][infrastructure][servers]
+    in
+        extracted_data
+    ```
+
+**Short Interview Answer:**
+Because Power BI lacks a native GraphQL connector, I must manually construct an HTTP POST request using the M language. I define the GraphQL query as a text string and convert it to a binary payload using `Text.ToBinary()`. I then call `Web.Contents()`, passing the GraphQL endpoint URL and an options record. Inside the options record, I set the `Headers` to accept `application/json` and apply the `Content` parameter with my binary payload. Providing the `Content` parameter natively forces `Web.Contents` to execute a POST request instead of a GET. I then use `Json.Document()` to parse the response and drill down into the nested GraphQL `data` object.
+
+## Part 62: DAX Advanced - The `ALL` Family of Functions
+
+### 92. What is the precise functional difference between `ALL()`, `ALLEXCEPT()`, and `ALLSELECTED()`? Provide a specific scenario where you would use `ALLEXCEPT`.
+**Detailed Answer:**
+These functions are Context Modifiers used strictly inside `CALCULATE` to manipulate the filter context.
+*   **`ALL(Table)`:** The nuclear option. It completely strips away *every single filter* currently applied to the table, regardless of where the filter came from (slicers, rows, columns, external pages).
+    *   *Usage:* Calculating the absolute Grand Total denominator for a "Percentage of Total" metric.
+*   **`ALLSELECTED(Table)`:** The "Visual Total" option. It strips away the filters coming from the *inside* of the visual (like the specific row you are currently evaluating in a matrix), but it explicitly *keeps* the filters coming from the *outside* (like page-level slicers).
+    *   *Usage:* Calculating "Percentage of *Filtered* Total". If a user slices by "US Region", the denominator stays restricted to the US total, rather than the global total.
+*   **`ALLEXCEPT(Table, ColumnA, ColumnB)`:** The "Preservation" option. It strips all filters from the table, *except* for the specific columns you explicitly list.
+    *   *The Scenario:* You have a `Sales` table with `Date`, `Region`, and `Product`. The business wants a measure showing the "Total Regional Sales", which ignores any Product filters a user might click, but still respects Date and Region filters.
+    *   *The DAX:* `CALCULATE([Sales], ALLEXCEPT(Sales, Sales[Date], Sales[Region]))`
+    *   *Why:* This is much faster to write and maintain than using `ALL(Product)` if you have 20 different columns you want to ignore. You just specify the two columns you actually care about preserving.
+
+**Short Interview Answer:**
+These three modifiers dictate exactly which filters are removed during a `CALCULATE` evaluation. `ALL` is absolute; it aggressively removes every filter on the target table, yielding a true global total. `ALLSELECTED` removes visual-level row/column filters but strictly preserves external page-level slicers, making it ideal for dynamic "Percentage of Filtered Total" calculations. `ALLEXCEPT` strips all filters from a table *except* for the explicitly named columns. I use `ALLEXCEPT` when a table has dozens of columns, but I want a measure (like "Total Regional Sales") to dynamically ignore everything (Product, Manager, Category) while strictly preserving only the user's Date and Region slicer selections.
+
+
+## Part 63: DAX - Handling Unrelated Tables & `CROSSJOIN` Dangers
+
+### 93. You have an `Infrastructure_Costs` table and a `Headcount` table. There is no logical relationship between them (they don't share a date or region). You want a measure that divides Total Cost by Total Headcount. Will this DAX work, and why might the visual fail?
+**Detailed Answer:**
+*   **The DAX:** `Cost Per Employee = DIVIDE([Total Cost], [Total Headcount])`
+*   **The Problem (The Cartesian Explosion):** If you just put this measure on a card visual, it works fine (Scalar / Scalar). However, if a user drags `Department` (from the Headcount table) and `ServerType` (from the Costs table) into a single Matrix visual alongside this measure, the visual will likely crash with a "Memory Allocation" error.
+*   **The Mechanism (Auto-Crossjoin):** Because there is no physical relationship connecting `Department` and `ServerType`, the VertiPaq engine doesn't know how to filter them against each other. It defaults to the only mathematical option: a Cartesian Product (`CROSSJOIN`). 
+    *   If you have 100 Departments and 1,000 ServerTypes, the engine suddenly attempts to materialize 100,000 rows in memory, even if 99% of those combinations have no business value, causing an instant OOM on large datasets.
+*   **The SRE Fix (Data Modeling):** You must *never* let end-users cross-filter using dimensions from unrelated fact tables. You must build a unified, conformed dimension (e.g., a central `Business_Unit` table) and relate *both* the `Costs` table and the `Headcount` table to it (a Star Schema with multiple facts).
+
+**Short Interview Answer:**
+While dividing two measures from unrelated tables works fine at a high-level summary (like a Card), it becomes a catastrophic performance risk in a Matrix visual. If a user pulls a dimension column from Fact Table A and another dimension column from Fact Table B into the same visual, the VertiPaq engine realizes there is no relationship path between them. To resolve the filter context, it attempts a Cartesian product (an implicit `CROSSJOIN`) of both tables. On enterprise datasets, this instantly causes an Out-Of-Memory memory crash. The only architectural fix is to normalize the model by creating shared, conformed dimension tables that relate to both fact tables.
+
+## Part 64: Power BI Admin - Tenant Settings & Governance
+
+### 94. The SRE team discovers that sensitive infrastructure dashboards are being emailed to personal Gmail accounts via the "Publish to Web" and "Export to Excel" features. How do you govern this at the Tenant level without blocking the finance team from doing their jobs?
+**Detailed Answer:**
+Security in Power BI is managed in the **Power BI Admin Portal -> Tenant Settings**.
+*   **Publish to Web (The biggest risk):** This feature generates an unauthenticated, public URL. It completely bypasses all Azure AD and RLS. 
+    *   *Action:* Disable this globally for the entire organization. There is almost zero legitimate enterprise use case for this feature; use Power BI Embedded instead.
+*   **Export to Excel (The nuance):** You cannot disable this globally, because the Finance team will riot.
+    *   *Action (Security Groups):* In the Tenant Settings for "Export to Excel", change the setting from "Entire Organization" to **"Specific Security Groups"**. You add the `Finance_Team_AD_Group` to the allow-list. Now, SREs and general employees are physically blocked from exporting data, but Finance can continue working.
+*   **Microsoft Purview Information Protection (MIP):** The ultimate enterprise solution. You apply Sensitivity Labels (e.g., "Highly Confidential - Internal Only") to the Power BI dataset. When the Finance team *does* export to Excel, that Excel file inherits the MIP label. The Excel file is cryptographically locked; if they email it to their personal Gmail, they cannot open it without authenticating against the corporate Azure AD.
+
+**Short Interview Answer:**
+I immediately go to the Power BI Admin Portal's Tenant Settings. I completely disable the "Publish to Web" feature globally, as it generates unauthenticated public URLs that bypass all security. For "Export to Excel", a global ban is too disruptive. Instead, I restrict the feature using Azure AD Security Groups, explicitly allowing only necessary departments (like Finance) while blocking the rest of the company. Finally, to truly secure the data even *after* it leaves Power BI, I implement Microsoft Purview Sensitivity Labels on the datasets. This ensures that any exported Excel file is cryptographically encrypted and cannot be opened outside the corporate network, regardless of where it is emailed.
+
+
+## Part 65: Power Query - Advanced Optimization (M) - The `Table.SelectRows` Trap
+
+### 95. A developer writes `Table.SelectRows(Source, each [Date] = DateTime.LocalNow())` to filter for today's incidents. This query takes 45 minutes to execute against a SQL database. Why is this specific M function call a catastrophic performance killer, and how do you fix it?
+**Detailed Answer:**
+*   **The Trap (`DateTime.LocalNow()`):** Power Query evaluates logic lazily and dynamically. Because `DateTime.LocalNow()` is a volatile function (its value literally changes every millisecond), the Power Query mashup engine assumes the value might be different for row 1 versus row 1,000,000.
+*   **Query Folding Breaks:** Because the engine thinks the filter value is volatile per-row, it absolutely refuses to fold this into a static SQL `WHERE Date = '2023-10-26'` clause.
+*   **The Execution (Table Scan):** Since it cannot fold, Power Query downloads the entire 100-million row `Source` table over the network into local RAM. It then evaluates `[Date] = DateTime.LocalNow()` sequentially, one by one, 100 million times.
+*   **The Fix (Static Variables):** You must extract the volatile function and evaluate it exactly once, assigning it to a static M variable *before* the `Table.SelectRows` step.
+    ```powerquery
+    let
+        Source = Sql.Database(...),
+        // Evaluate the volatile function ONCE
+        CurrentTime = DateTime.LocalNow(),
+        // Use the static variable in the filter
+        FilteredRows = Table.SelectRows(Source, each [Date] = CurrentTime)
+    in
+        FilteredRows
+    ```
+*   **The Result:** The engine sees `CurrentTime` as a static constant. It successfully translates it into a native SQL `WHERE` clause, pushes it to the database, and the query executes in 3 seconds.
+
+**Short Interview Answer:**
+Using a volatile function like `DateTime.LocalNow()` directly inside the `Table.SelectRows` "each" iterator breaks Query Folding. The engine assumes the time value might change during the evaluation, preventing it from generating a static SQL `WHERE` clause. This forces the Gateway to download the entire multi-million row table into local memory and perform a slow, row-by-row iteration. To fix this, I extract the `DateTime.LocalNow()` call out of the iterator, evaluate it exactly once, and assign it to a named variable. I then pass that static variable into `Table.SelectRows`, allowing the engine to successfully fold the filter back to the source database.
+
+## Part 66: DAX - Handling Non-Additive Measures
+
+### 96. Most measures (like Sales or CPU Cores) are additive (you can `SUM` them across any dimension). "Inventory Level" or "Active Alert Count" are "Semi-Additive". How do you write a DAX measure that correctly calculates the total Active Alerts for a specific day, but does *not* sum those days together if a user views the data at the "Month" level?
+**Detailed Answer:**
+*   **The Math Problem:** If you have 5 active alerts on Monday, and 6 active alerts on Tuesday, you do not have 11 total alerts for the week. The correct metric for the "Week" level is usually the *last known value* (6 alerts on Tuesday) or the *average*.
+*   **The Solution (`LASTNONBLANK` or `LASTDATE`):** You must write DAX that dynamically alters its behavior based on the time granularity of the visual.
+    ```dax
+    Closing Active Alerts = 
+    CALCULATE(
+        SUM(Alerts[Daily_Count]), -- The base metric
+        LASTNONBLANK(
+            'Date'[Date], -- Scan the date table
+            CALCULATE(COUNTROWS(Alerts)) -- Find the last day that actually had data
+        )
+    )
+    ```
+*   **How it works:**
+    *   *At the Day Level:* If the visual shows "Monday", `LASTNONBLANK` just returns Monday. It calculates the sum for Monday (5).
+    *   *At the Month Level:* If the visual shows "January", `LASTNONBLANK` scans the entire month of January, finds the absolute last day that a telemetry row was recorded (e.g., Jan 31st), and evaluates the sum *only* for Jan 31st. It entirely prevents the mathematically invalid summation of Jan 1 through Jan 31.
+
+**Short Interview Answer:**
+Semi-additive measures, like inventory balances or active alert counts, cannot be mathematically summed across the time dimension (e.g., adding Monday's alerts to Tuesday's alerts yields a false total). To handle this, I wrap the base aggregation inside a `CALCULATE` statement utilizing the `LASTNONBLANK` or `LASTDATE` time-intelligence functions. This forces the measure to evaluate the current filter context (whether it's a Week, Month, or Year) and isolate the aggregation exclusively to the final recorded day of that specific period, ensuring the Grand Total rows reflect the closing balance rather than a mathematically invalid cumulative sum.
+
+## Part 67: Enterprise Power BI - The Composite Model Architecture
+
+### 97. Explain the "Composite Model V2" (DirectQuery for Power BI datasets). Why is this feature revolutionary for enterprise "Hub and Spoke" deployments, and what is its primary performance risk?
+**Detailed Answer:**
+*   **The V1 Hub and Spoke (Live Connection):** Historically, a spoke report connected "Live" to a central Hub dataset. The limitation: You could not add *new* data to the spoke. If a regional manager wanted to combine the global Hub dataset with their own local Excel spreadsheet of targets, they couldn't. They had to ask the central IT team to add the Excel file to the master Hub.
+*   **Composite Model V2 (The Revolution):** It allows you to convert that strict "Live Connection" into a "DirectQuery" connection.
+    *   *The Magic:* The regional manager connects to the massive, central Enterprise Hub via DirectQuery. They can *then* import their local Excel spreadsheet into the *same* Power BI Desktop file.
+    *   *The Architecture:* They can draw physical relationships between the Enterprise Hub tables (living in the cloud) and their local Excel tables (living in their local model).
+*   **The Performance Risk:** If the manager writes a DAX measure that iterates across the local Excel table and the remote cloud table simultaneously, the VertiPaq engine must pull massive amounts of unaggregated data from the cloud Hub into the local model to perform the cross-join calculation. This can cause the visual to take minutes to load or crash the local Power BI Desktop completely.
+
+**Short Interview Answer:**
+Composite Models V2 revolutionized Hub and Spoke architectures by allowing users to establish a DirectQuery connection to a centrally governed Power BI dataset, while simultaneously importing their own local data (like an Excel file) into the exact same report. This empowers regional teams to blend enterprise data with local targets autonomously. However, the primary risk is cross-source querying. If a user builds a relationship or DAX measure that forces the engine to join the remote cloud data with the local Excel data, the engine often cannot fold the query. It is forced to download massive, unaggregated datasets from the cloud to the local machine to perform the join, resulting in severe performance degradation.
+
+
+## Part 68: Power Query - Advanced Optimization (M) - Custom Table Functions
+
+### 98. You are joining two tables in Power Query based on a string column (e.g., `ServerName`). The join is incredibly slow, and you realize the strings have mismatched casing and trailing spaces across the two systems. How do you clean the keys *efficiently* without breaking Query Folding?
+**Detailed Answer:**
+*   **The Trap (UI Cleaning):** A developer typically clicks the `ServerName` column -> Transform -> Format -> Lowercase, and then Format -> Trim. 
+    *   *The Problem:* Applying these text transformations sequentially often breaks Query Folding, especially against certain APIs or legacy databases. If folding breaks, the join happens locally in RAM, which is catastrophically slow.
+*   **The Advanced Solution (Table.Join options):** Power Query's `Table.NestedJoin` function accepts an optional parameter: `JoinAlgorithm` or `Comparer`.
+*   **Implementation (`Comparer.OrdinalIgnoreCase`):** Instead of physically transforming the text in both columns (which risks folding), you instruct the join engine to simply ignore case differences *during* the evaluation.
+    ```powerquery
+    let
+        Source1 = Table1,
+        Source2 = Table2,
+        JoinedTables = Table.NestedJoin(
+            Source1, {"ServerName"}, 
+            Source2, {"HostName"}, 
+            "JoinedData", 
+            JoinKind.LeftOuter, 
+            JoinAlgorithm.SortMerge, // Optional optimization
+            Comparer.OrdinalIgnoreCase // THE MAGIC FIX
+        )
+    in
+        JoinedTables
+    ```
+*   *(Note: For trailing spaces, you must still trim them, but ignoring case via the Comparer saves an entire transformation step and preserves folding paths longer).*
+
+**Short Interview Answer:**
+When joining tables on dirty string keys (like mismatched casing), physically transforming both columns using `.Text.Lower` often breaks Query Folding, forcing the Gateway to perform a slow, memory-intensive local join. To optimize this, I avoid transforming the data entirely. Instead, I modify the M code of the `Table.NestedJoin` step and inject the optional `Comparer.OrdinalIgnoreCase` parameter. This instructs the mashup engine to ignore capitalization strictly during the join evaluation phase, which is vastly more performant and maintains the integrity of the query folding chain back to the source system.
+
+## Part 69: DAX - Advanced Time Intelligence (Custom Fiscal Years)
+
+### 99. The business operates on a Fiscal Year starting July 1st. They want a "Year-to-Date (YTD)" measure. Why can't you just use the standard `TOTALYTD([Sales], 'Date'[Date])`? How do you fix it natively in DAX?
+**Detailed Answer:**
+*   **The Problem:** Standard DAX time intelligence functions (`TOTALYTD`, `DATESYTD`) are hardcoded to the Gregorian calendar. If you use them, the YTD calculation will abruptly reset to zero on January 1st, completely destroying the financial reporting for Q3 and Q4 of the fiscal year.
+*   **The Solution (The Overlooked Parameter):** Many developers write massive, complex `FILTER(ALL())` logic to solve this, not realizing that almost all built-in DAX time intelligence functions accept an optional "Year End Date" string parameter specifically for this scenario.
+*   **The DAX Implementation:**
+    ```dax
+    Fiscal YTD Sales = 
+    TOTALYTD(
+        [Total Sales], 
+        'Date'[Date], 
+        "06/30"  -- The magic parameter (Month/Day format)
+    )
+    ```
+    *   *Alternative with `CALCULATE`:*
+    ```dax
+    Fiscal YTD Sales = 
+    CALCULATE(
+        [Total Sales],
+        DATESYTD('Date'[Date], "06/30")
+    )
+    ```
+*   **How it executes:** The VertiPaq engine now knows the year ends on June 30th. When evaluating dates, the accumulator will start on July 1st and will only reset to zero when it crosses the June 30th boundary, perfectly aligning with the corporate fiscal calendar.
+
+**Short Interview Answer:**
+Using the standard `TOTALYTD` function without parameters defaults to the Gregorian calendar, causing the accumulator to incorrectly reset to zero on January 1st. To properly support a custom Fiscal Year (like one starting in July), I do not need to write complex custom filter logic. I simply utilize the optional "Year End Date" parameter built natively into DAX functions like `TOTALYTD` and `DATESYTD`. By passing the string `"06/30"` as the final argument, the VertiPaq engine automatically adjusts its time-shifting boundaries, seamlessly resetting the YTD calculation exactly on the corporate fiscal boundary.
+
+## Part 70: The Finale - SRE & BI Convergence
+
+### 100. As an SRE transitioning into BI, what is the fundamental architectural difference between how Prometheus stores Time-Series data versus how Power BI's VertiPaq engine stores Dimensional data? Why can't you just plug Power BI directly into Prometheus?
+**Detailed Answer:**
+This is the ultimate architectural understanding of observability analytics.
+*   **Prometheus (Time-Series Database - TSDB):**
+    *   *Structure:* It stores data as an immutable stream of (Timestamp, Value) pairs, tagged with high-cardinality metadata (labels). It is optimized for *sequential, massive write throughput* (millions of inserts per second) and narrow time-window queries.
+    *   *Limitation:* It has no concept of relational tables, joins, or business hierarchies.
+*   **Power BI VertiPaq (Columnar In-Memory Database):**
+    *   *Structure:* It stores data in highly compressed columns. It is a strict Relational Engine optimized for *read-heavy, complex aggregation* across multiple dimension tables (Star Schema).
+    *   *Limitation:* It is terrible at continuous, real-time micro-writes.
+*   **The Convergence Problem:** You cannot plug Power BI directly into Prometheus because the data shapes are fundamentally incompatible.
+    *   If you use the Grafana API to pull Prometheus data into Power BI, you get a massive, flat table of timestamps and string labels. VertiPaq cannot compress 500 million unique timestamps efficiently; it will cause an Out-Of-Memory crash.
+*   **The Architecture Solution:**
+    1.  **ETL Layer:** You must put an ETL pipeline (like Python or Azure Data Factory) between them.
+    2.  **Downsampling:** The ETL script pulls 15-second PromQL data and aggregates it into 1-hour or 1-day chunks.
+    3.  **Dimensional Modeling:** The script parses the Prometheus labels (`region="us-east"`, `cluster="alpha"`) and shreds them into a proper Relational Star Schema (a `Fact_Metrics` table, a `Dim_Region` table, a `Dim_Cluster` table).
+    4.  **The Result:** Power BI connects to this SQL Star Schema, allowing VertiPaq to compress the dimensions perfectly and deliver instant, long-term business insights that Grafana cannot provide.
+
+**Short Interview Answer:**
+Prometheus is a TSDB optimized for massive sequential writes and time-bounded metric streams, completely lacking relational concepts. Power BI's VertiPaq is a columnar engine strictly optimized for read-heavy aggregations across structured relational Star Schemas. Plugging them directly together is an anti-pattern because VertiPaq cannot efficiently compress hundreds of millions of unique Unix timestamps, leading to OOM crashes. As an engineer bridging both worlds, I architect an intermediary ETL pipeline. This pipeline downsamples the high-frequency Prometheus data, shreds the raw metric labels into structured Dimension tables, and loads them into a SQL data warehouse, transforming the raw telemetry into a VertiPaq-optimized Star Schema suitable for long-term executive reporting.
+
